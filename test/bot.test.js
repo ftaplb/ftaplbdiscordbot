@@ -181,7 +181,7 @@ test('privileged roles cannot be bound or assigned as game ranks', () => {
   assert.throws(() => safeRankRole(role, guild, { roles: { highest: { position: 1 } } }), /above/);
 });
 
-test('100 members fit in card pages and all embed fields stay below Discord limits', async () => {
+test('100 members fit in card pages and attachments stay within Discord limits', async () => {
   const f = fixture(100);
   for (const entry of f.guild.members.cache.values()) entry.displayName = '<>& " 🎮 '.repeat(10);
   f.state.settings.pageSize = 25;
@@ -191,7 +191,8 @@ test('100 members fit in card pages and all embed fields stay below Discord limi
   assert.equal(pages.flat().length, 100);
   const payload = await renderPage(pages[0], f.state.settings, { page: 1, pages: 4, total: 100 });
   const embed = payload.embeds[0].toJSON();
-  assert.ok(embed.fields.every(field => field.value.length <= 1024));
+  assert.ok(JSON.stringify(embed).length < 6000);
+  assert.ok(payload.files[0].description.length <= 1024);
   assert.equal((await sharp(payload.files[0].attachment).metadata()).format, 'png');
   assert.equal(payload.allowedMentions.parse.length, 0);
   const svg = cardSvg(pages[0], f.state.settings);

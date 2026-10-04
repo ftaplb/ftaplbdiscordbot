@@ -57,15 +57,9 @@ export async function renderPage(rows, settings, meta) {
   const embed = new EmbedBuilder().setColor(settings.color).setImage(`attachment://${name}`);
   if (meta.page === 1) embed.setTitle(settings.title).setDescription(plain(settings.description));
   if (settings.thumbnail) embed.setThumbnail(settings.thumbnail);
-  // Keep an accessible text list beside the image, without making the post bulky.
-  if (rows.length) {
-    for (const group of chunks(rows, 10)) embed.addFields({
-      name: `Positions ${group[0].position}–${group.at(-1).position}`,
-      value: group.map(row => `**${row.position}.** ${plain(row.name).slice(0, 25)} · ${row.rank}`).join('\n'),
-    });
-  } else embed.addFields({ name: 'No participants', value: 'Give a member a rank role to add them.' });
   embed.setFooter({ text: `${meta.total} participants · Page ${meta.page}/${meta.pages}` });
-  return { embeds: [embed], files: [new AttachmentBuilder(png, { name })], allowedMentions: { parse: [] } };
+  const description = rows.length ? rows.map(row => `${row.position}. ${row.name} — ${row.rank}${row.roblox ? ` (${row.roblox})` : ''}`).join('\n').slice(0, 1024) : 'No ranked members yet.';
+  return { embeds: [embed], files: [new AttachmentBuilder(png, { name, description })], allowedMentions: { parse: [] } };
 }
 
 export function boardPages(rows, settings) {
