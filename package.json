@@ -1,0 +1,18 @@
+{
+  "name": "ftaplbdiscordbot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Fling Things and People community leaderboard",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env src/index.js",
+    "test": "node --test",
+    "check": "node scripts/check.js",
+    "preview": "node scripts/preview.js"
+  },
+  "dependencies": {
+    "discord.js": "14.27.0",
+    "sharp": "0.35.5"
+  }
+}
