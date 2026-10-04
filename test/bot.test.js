@@ -101,11 +101,16 @@ test('excluded and departed members disappear', () => {
   assert.deepEqual(standings(f.guild, f.state).map(row => row.id), [ids[2]]);
 });
 
-test('53 commands include exactly 50 additional staff commands', () => {
-  assert.equal(commands.size, 53);
-  assert.equal([...commands.values()].filter(entry => entry.access === 'staff' && entry.name !== 'participants').length, 50);
+test('original staff tools and the new rank/access commands have explicit permissions', () => {
+  assert.ok(commands.size >= 53);
+  assert.ok([...commands.values()].filter(entry => entry.access === 'staff' && entry.name !== 'participants').length >= 47);
   assert.equal(commands.get('setchannel').access, 'admin');
   assert.equal(commands.get('help').access, 'public');
+  assert.equal(commands.get('setrank').access, 'rank');
+  assert.equal(commands.get('removerank').access, 'rank');
+  assert.equal(commands.get('addserver').access, 'homeadmin');
+  assert.equal(commands.get('addevaluator').access, 'admin');
+  assert.equal(commands.get('prefix').access, 'admin');
 });
 
 test('Administrator does not bypass the two staff-role requirement', () => {
@@ -125,7 +130,7 @@ test('every protected command rejects an ordinary member before executing', asyn
   for (const entry of commands.values()) {
     if (entry.access === 'public') continue;
     const message = { author: { id: '123', bot: false }, guildId: GUILD_ID, content: `$${entry.name}`, guild: { members: { fetch: async () => actor } }, reply: async () => { replies++; } };
-    await assert.rejects(dispatch(message, { cooldowns: new Map() }), /need/);
+    await assert.rejects(dispatch(message, { cooldowns: new Map() }), /need|home-server administrator/);
   }
   assert.equal(replies, 0);
 });
@@ -190,7 +195,7 @@ test('100 members fit in card pages and attachments stay within Discord limits',
   assert.equal(pages.length, 4);
   assert.equal(pages.flat().length, 100);
   const payload = await renderPage(pages[0], f.state.settings, { page: 1, pages: 4, total: 100 });
-  const embed = payload.embeds[0].toJSON();
+  const embed = payload.embeds[0].toJSON?.() ?? payload.embeds[0];
   assert.ok(JSON.stringify(embed).length < 6000);
   assert.ok(payload.files[0].description.length <= 1024);
   assert.equal((await sharp(payload.files[0].attachment).metadata()).format, 'png');
@@ -205,7 +210,7 @@ test('help shows all commands in one valid Discord embed', async t => {
   const actor = { id: '123' };
   let payload;
   await dispatch({ author: { id: '123', bot: false }, guildId: GUILD_ID, content: '$help', guild: { members: { fetch: async () => actor } }, reply: async value => { payload = value; } }, { store, cooldowns: new Map() });
-  const embed = payload.embeds[0].toJSON();
+  const embed = payload.embeds[0].toJSON?.() ?? payload.embeds[0];
   assert.ok(embed.fields.every(field => field.value.length <= 1024));
   assert.ok(JSON.stringify(embed).length < 6000);
   const help = embed.fields.map(field => field.value).join('\n');

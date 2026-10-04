@@ -1,8 +1,10 @@
 # Command reference
 
-53 commands total: `$help`, `$setchannel`, `$participants`, and 50 additional staff commands.
+72 commands. The default prefix is `$`; replace it with your server’s prefix if changed.
 
-Staff means a member with role `1541427910198427809` or `1538609206763061308`. Administrator alone does not bypass staff access.
+Staff means a configured staff role. The home server starts with roles `1541427910198427809` and `1538609206763061308`.
+
+Evaluators get `setrank` and `removerank` only, plus public commands. Editors can also use `rank`, `promote`, and `demote`. Access lists, prefix, and channel selection require Administrator. Only home-server administrators can manage enabled servers.
 
 ## Start here
 
@@ -27,7 +29,7 @@ Staff means a member with role `1541427910198427809` or `1538609206763061308`. A
 | `$footer <text>` | Change the leaderboard footer. | Staff |
 | `$color <#RRGGBB>` | Change the board accent color. | Staff |
 | `$thumbnail <https URL \| off>` | Set or remove the small embed image. | Staff |
-| `$pagesize <10–25>` | Set the number of players per leaderboard card. | Staff |
+| `$pagesize <10–50>` | Set the number of players per leaderboard table. | Staff |
 
 ## Players
 
@@ -38,9 +40,9 @@ Staff means a member with role `1541427910198427809` or `1538609206763061308`. A
 | `$player <@member>` | Show a player’s rank, position, and recorded stats. | Staff |
 | `$rename <@member> <name \| off>` | Set a board display name without changing the Discord nickname. | Staff |
 | `$roblox <@member> <username \| off>` | Record a Roblox username for the board. | Staff |
-| `$rank <@member> <rank>` | Assign one of the 12 ranks and remove their other rank roles. | Staff |
-| `$promote <@member>` | Raise a member by one rank. | Staff |
-| `$demote <@member>` | Lower a member by one rank. | Staff |
+| `$rank <@member> <rank>` | Assign one of the 12 ranks and remove their other rank roles. | Editor or staff |
+| `$promote <@member>` | Raise a member by one rank. | Editor or staff |
+| `$demote <@member>` | Lower a member by one rank. | Editor or staff |
 | `$score <@member> <number>` | Set a player’s manually recorded score. | Staff |
 | `$wins <@member> <number>` | Set a player’s manually recorded wins. | Staff |
 | `$losses <@member> <number>` | Set a player’s manually recorded losses. | Staff |
@@ -68,6 +70,9 @@ Staff means a member with role `1541427910198427809` or `1538609206763061308`. A
 | `$rankclear <rank>` | Remove a role override and return to exact-name role matching. | Staff |
 | `$rankmembers <rank>` | List players whose highest rank is the given rank. | Staff |
 | `$rankstats` | Show participant counts per highest rank. | Staff |
+| `$setrank <@member> <rank or alias>` | Set one of the 12 game ranks, e.g. skillful 1, sk1, adv3, or fg. | Evaluator, editor, or staff |
+| `$removerank <@member> [rank, family, or all]` | Remove game rank roles only. Use skillful to remove Skillful I–III. | Evaluator, editor, or staff |
+| `$rankaliases` | List accepted full names, numbers, and abbreviations. | Everyone |
 
 ## Settings
 
@@ -78,6 +83,7 @@ Staff means a member with role `1541427910198427809` or `1538609206763061308`. A
 | `$logoff` | Turn off Discord audit posts; keep local history. | Staff |
 | `$interval <2–60>` | Set the fallback member-sync interval in minutes. | Staff |
 | `$sync` | Fetch all members and roles, then rebuild the board. | Staff |
+| `$prefix <prefix>` | Change this server’s command prefix. | Administrator |
 
 ## Data
 
@@ -92,6 +98,49 @@ Staff means a member with role `1541427910198427809` or `1538609206763061308`. A
 | `$redo` | Redo a saved settings/player-data change; Discord roles are unaffected. | Staff |
 | `$resetstats <@member>` | Reset one player’s recorded score, wins, and losses. | Staff |
 
-For multiword ranks, use the exact name, e.g. `$rank @member Advanced III`.
+## Servers
 
-For `$restore`, choose a local backup ID from `$backups`. Undo/redo/restore do not alter Discord roles or the selected board channel.
+| Command | What it does | Access |
+| --- | --- | --- |
+| `$addserver <server ID>` | Enable another server. The bot must already be invited there. | Home-server administrator |
+| `$removeserver <server ID>` | Disable a server while keeping its saved data. | Home-server administrator |
+| `$servers` | List enabled servers and connection status. | Home-server administrator |
+
+## Access
+
+| Command | What it does | Access |
+| --- | --- | --- |
+| `$addeditor <@member or user ID>` | Allow a member to use game rank editing commands. | Administrator |
+| `$removeeditor <@member or user ID>` | Revoke a member’s editor access. | Administrator |
+| `$editors` | List this server’s editors. | Administrator |
+| `$addevaluator <@member or user ID>` | Allow a member to use setrank and removerank only. | Administrator |
+| `$removeevaluator <@member or user ID>` | Revoke a member’s evaluator access. | Administrator |
+| `$evaluators` | List this server’s evaluators. | Administrator |
+| `$staffrole <role ID> [add or remove]` | Configure local staff access to board, player-data, and backup commands. | Administrator |
+
+## Profiles
+
+| Command | What it does | Access |
+| --- | --- | --- |
+| `$playerprofile [@member]` | Show a member’s rank, Roblox name, rating, country, clan, and recorded stats. | Everyone |
+| `$rating <@member> <number or off>` | Set or clear a player’s manually entered rating. | Staff |
+| `$rd <@member> <number or off>` | Set or clear a player’s manually entered rd. | Staff |
+| `$country <@member> <text or off>` | Set or clear a player’s country. | Staff |
+| `$clan <@member> <text or off>` | Set or clear a player’s clan. | Staff |
+
+## Rank aliases
+
+| Rank | Alias |
+| --- | --- |
+| Fling God | `fg` |
+| Advanced I / II / III | `adv1` / `adv2` / `adv3` |
+| Expert I / II / III | `e1` / `e2` / `e3` |
+| Skillful I / II / III | `sk1` / `sk2` / `sk3` |
+| Apprentice | `app` |
+| Casual | `cas` |
+
+Numbered full names work too: `$setrank @member skillful 1`. A unique one-character typo is accepted; ambiguous or unknown names are rejected.
+
+`$removerank @member skillful` removes Skillful I–III only. `$removerank @member e1` removes Expert I only. Omit the rank to remove all game ranks. Unrelated roles stay unchanged.
+
+For `$restore`, choose a local backup ID from `$backups`. Undo/redo/restore do not alter Discord roles, the selected board channel, the prefix, or access lists.

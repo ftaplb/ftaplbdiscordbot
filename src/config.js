@@ -16,13 +16,14 @@ export const RANKS = [
   ['Casual', '#acb5c4'],
 ].map(([name, color], index) => ({ name, color, index }));
 
-export function defaults() {
+export function defaults(guildId = GUILD_ID) {
   return {
-    version: 1,
+    version: 1, guildId, prefix: PREFIX,
+    access: { editors: [], evaluators: [], staffRoles: guildId === GUILD_ID ? [...STAFF_ROLES] : [] },
     settings: {
-      limit: 100, pageSize: 15, interval: 2, paused: false,
+      limit: 100, pageSize: 25, interval: 2, paused: false,
       title: 'Community leaderboard', description: 'Fling Things and People',
-      color: '#f5ca55', thumbnail: null, footer: 'FTAP Community',
+      color: '#d6d18e', thumbnail: null, footer: 'FTAP Community',
       sort: 'manual', logChannelId: null,
     },
     players: {}, order: [], excluded: [], rankRoles: {},

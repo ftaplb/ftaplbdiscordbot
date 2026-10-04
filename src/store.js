@@ -1,19 +1,23 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { defaults } from './config.js';
+import { defaults, GUILD_ID } from './config.js';
 import { requireThat } from './util.js';
 
 const editable = ['settings', 'players', 'order', 'excluded', 'rankRoles'];
 export const snapshot = state => Object.fromEntries(editable.map(key => [key, structuredClone(state[key])]));
 
 export class Store {
-  constructor(directory) {
+  constructor(directory, guildId = GUILD_ID) {
     this.directory = path.resolve(directory);
     this.file = path.join(this.directory, 'state.json');
     fs.mkdirSync(this.directory, { recursive: true });
-    this.state = fs.existsSync(this.file) ? JSON.parse(fs.readFileSync(this.file, 'utf8')) : defaults();
-    requireThat(this.state.version === 1 && this.state.settings && this.state.delivery, 'Unsupported state file. Keep a copy and restore a valid backup.');
+    const initial = defaults(guildId);
+    const saved = fs.existsSync(this.file) ? JSON.parse(fs.readFileSync(this.file, 'utf8')) : initial;
+    requireThat(saved.version === 1 && saved.settings && saved.delivery, 'Unsupported state file. Keep a copy and restore a valid backup.');
+    this.state = { ...initial, ...saved, settings: { ...initial.settings, ...saved.settings }, access: { ...initial.access, ...saved.access } };
+    requireThat(!saved.guildId || saved.guildId === guildId, 'This state file belongs to a different server.');
     fs.mkdirSync(path.join(this.directory, 'backups'), { recursive: true });
+    this.save(this.state);
   }
 
   save(next) {
@@ -74,6 +78,6 @@ export class Store {
     requireThat(/^\d+$/.test(id ?? '') && this.backups().includes(id), 'Use a backup ID from $backups.');
     const saved = JSON.parse(fs.readFileSync(path.join(this.directory, 'backups', `${id}.json`), 'utf8'));
     requireThat(saved.version === 1 && editable.every(key => Object.hasOwn(saved.data, key)), 'That backup is invalid.');
-    this.change(actor, `restore ${id}`, next => Object.assign(next, saved.data));
+    this.change(actor, `restore ${id}`, next => Object.assign(next, Object.fromEntries(editable.map(key => [key, saved.data[key]]))));
   }
 }

@@ -1,16 +1,55 @@
 import { RANKS } from './config.js';
 import { requireThat } from './util.js';
 
+const normalized = value => String(value).trim().toLowerCase().replace(/[\s_-]+/g, '');
+const aliases = new Map(RANKS.map(rank => [normalized(rank.name), rank]));
+for (const [alias, name] of [['fg', 'Fling God'], ['app', 'Apprentice'], ['cas', 'Casual']]) aliases.set(alias, RANKS.find(rank => rank.name === name));
+for (const [family, short] of [['Skillful', 'sk'], ['Expert', 'e'], ['Advanced', 'adv']]) {
+  for (const [i, roman] of ['I', 'II', 'III'].entries()) {
+    const rank = RANKS.find(item => item.name === `${family} ${roman}`);
+    aliases.set(`${short}${i + 1}`, rank);
+    aliases.set(`${family.toLowerCase()}${i + 1}`, rank);
+  }
+}
+
+function oneTypo(a, b) {
+  if (Math.abs(a.length - b.length) > 1) return false;
+  if (a.length > b.length) return oneTypo(b, a);
+  let i = 0, j = 0, differences = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) { i++; j++; continue; }
+    if (++differences > 1) return false;
+    if (a.length === b.length) i++;
+    j++;
+  }
+  return differences + (i < a.length || j < b.length ? 1 : 0) <= 1;
+}
+
+export const isRankRoleName = value => aliases.has(normalized(value));
+
 export function rankByName(value) {
-  const rank = RANKS.find(item => item.name.toLowerCase() === String(value).trim().toLowerCase());
-  requireThat(rank, 'Unknown rank. Use $ranks for the exact names.');
+  const name = normalized(value);
+  let rank = aliases.get(name);
+  if (!rank && name.length >= 4) {
+    const closest = new Map([...aliases].filter(([alias]) => oneTypo(name, alias)).map(([, candidate]) => [candidate.name, candidate]));
+    if (closest.size === 1) rank = closest.values().next().value;
+  }
+  requireThat(rank, 'Unknown rank. Use a rank name or fg, adv1–3, e1–3, sk1–3, app, cas.');
   return rank;
+}
+
+export function ranksToRemove(value) {
+  const name = String(value ?? '').trim().toLowerCase();
+  if (!name || name === 'all') return RANKS;
+  const families = { skillful: 'Skillful', sk: 'Skillful', expert: 'Expert', e: 'Expert', advanced: 'Advanced', adv: 'Advanced' };
+  if (families[name]) return RANKS.filter(rank => rank.name.startsWith(`${families[name]} `));
+  return [rankByName(value)];
 }
 
 export function roleMap(guild, state) {
   return new Map(RANKS.map(rank => {
     if (Object.hasOwn(state.rankRoles, rank.name)) return [rank.name, guild.roles.cache.get(state.rankRoles[rank.name]) ?? null];
-    const matches = [...guild.roles.cache.values()].filter(role => role.name.trim().toLowerCase() === rank.name.toLowerCase());
+    const matches = [...guild.roles.cache.values()].filter(role => aliases.get(normalized(role.name))?.name === rank.name);
     return [rank.name, matches.length === 1 ? matches[0] : null];
   }));
 }
@@ -39,6 +78,8 @@ export function standings(guild, state) {
       id: member.id, name: profile.name || member.displayName,
       username: member.user.username, roblox: profile.roblox || '',
       score: profile.score ?? 0, wins: profile.wins ?? 0, losses: profile.losses ?? 0,
+      rating: profile.score ?? null, rd: profile.rd ?? null,
+      country: profile.country || '', clan: profile.clan || '',
       rank: rank.name, rankIndex: rank.index, color: rank.color,
     });
   }

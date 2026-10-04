@@ -15,7 +15,21 @@ const players = [
   ['diogoxFPC', 'diogo_bpa', 'Expert II'],
   ['Lal', 'lal_chmo', 'Expert II'],
   ['Index', 'indequo', 'Expert I'],
-].map(([name, roblox, rank], i) => ({ name, roblox, rank, username: name, position: i + 1, color: RANKS.find(item => item.name === rank).color }));
-const png = await sharp(Buffer.from(cardSvg(players, defaults().settings, { total: 10, updatedAt: new Date('2026-10-04T18:00:00Z') }))).png().toBuffer();
+  ['Huracan', '', 'Expert I'], ['IortFaeky', '', 'Expert I'],
+  ['Rain2', '', 'Expert I'], ['Illani', '', 'Expert I'],
+  ['Whack_Fl7ng', '', 'Skillful III'], ['Meliodas', '', 'Skillful III'],
+  ['Max', '', 'Skillful II'], ['yumi', '', 'Skillful II'],
+  ['Morph', '', 'Skillful I'], ['MrRobloxian', '', 'Skillful I'],
+  ['SmartDev', '', 'Apprentice'], ['KL_Cabs', '', 'Apprentice'],
+  ['REALISM', '', 'Casual'], ['Oni', '', 'Casual'], ['Olen', '', 'Casual'],
+].map(([name, roblox, rank], i) => ({
+  name, roblox, rank, username: name, position: i + 1,
+  color: RANKS.find(item => item.name === rank).color,
+  rating: 2147 - i * 24, rd: 110 + (i * 13) % 130,
+  country: ['Germany', 'Russia', 'United States', 'United Kingdom', 'Thailand'][i % 5],
+  clan: ['WN', '', 'DKM', '', 'RC'][i % 5],
+}));
+const settings = { ...defaults().settings, footer: 'Layout sample' };
+const png = await sharp(Buffer.from(cardSvg(players, settings, { total: players.length, updatedAt: new Date('2026-10-04T18:00:00Z') }))).png().toBuffer();
 fs.writeFileSync('preview.png', png);
 console.log('Saved preview.png (sample data).');
