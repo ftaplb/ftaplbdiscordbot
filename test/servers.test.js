@@ -4,12 +4,15 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { PermissionsBitField, PermissionFlagsBits } from 'discord.js';
-import { defaults, GUILD_ID, RANKS, STAFF_ROLES } from '../src/config.js';
+import { defaults, DEVICE_ROLES, GUILD_ID, RANKS, REGION_ROLES, STAFF_ROLES } from '../src/config.js';
 import { canUse, commands, dispatch } from '../src/commands.js';
 import { rankByName, ranksToRemove, roleMap, standings } from '../src/leaderboard.js';
 import { Servers } from '../src/servers.js';
 import { Coordinator } from '../src/coordinator.js';
 import { UserError } from '../src/util.js';
+import { Store } from '../src/store.js';
+import { readBackupAttachment, validateBackup } from '../src/backup.js';
+import { storageInfo } from '../src/storage.js';
 
 const SECOND_SERVER = '600000000000000000';
 const ACTOR = '700000000000000000';
@@ -30,6 +33,7 @@ function fixture(t, guildId = GUILD_ID) {
   const unrelated = { id: '910000000000000000', name: 'Friends' };
   const target = {
     id: TARGET, displayName: 'Player', guild, manageable: true,
+    permissions: new PermissionsBitField(),
     user: { bot: false, username: 'player' },
     roles: {
       cache: new Map([[unrelated.id, unrelated]]),
@@ -251,13 +255,16 @@ test('undo and backups cannot replace administrator-controlled access lists or p
   assert.deepEqual(f.store.state.access.editors, []);
 });
 
-test('playerprofile is public and uses local profile fields', async t => {
+test('playerprofile is public and follows region/device roles instead of legacy columns', async t => {
   const f = fixture(t);
   f.store.change(ACTOR, 'profile', next => { next.players[TARGET] = { score: 1800, rd: 110, country: 'Germany', clan: 'WN', roblox: 'sampleuser' }; });
+  f.target.roles.cache.set(REGION_ROLES.Europe, {});
+  f.target.roles.cache.set(DEVICE_ROLES.PC, {});
   await f.run(`$playerprofile <@${TARGET}>`);
   const result = f.replies.at(-1).embeds[0];
-  assert.ok(result.fields.some(field => field.name === 'Country' && field.value === 'Germany'));
-  assert.ok(result.fields.some(field => field.name === 'Rating / RD' && field.value === '1800 / 110'));
+  assert.ok(result.fields.some(field => field.name === 'Region' && field.value === 'Europe'));
+  assert.ok(result.fields.some(field => field.name === 'Device' && field.value === 'PC'));
+  assert.ok(!result.fields.some(field => ['Country', 'Clan', 'Rating / RD'].includes(field.name)));
 });
 
 test('per-server queues do not let one slow server block another', async t => {
@@ -308,4 +315,227 @@ test('home-server addserver starts an independent board and enables local public
   coordinator.disable(SECOND_SERVER);
   assert.equal(coordinator.boards.has(SECOND_SERVER), false);
   await coordinator.close();
+});
+
+test('staff members can delegate and revoke access using the new syntax, with restart persistence', async t => {
+  const f = fixture(t);
+  f.actor.roles.cache.set(STAFF_ROLES[0], {});
+  await f.run(`$staff add <@${TARGET}>`);
+  assert.equal(canUse(f.target, 'staff', f.store.state), true);
+  assert.equal(canUse(f.target, 'manage', f.store.state), true);
+  assert.deepEqual(new Servers(f.directory).store(GUILD_ID).state.access.staff, [TARGET]);
+  for (const [singular, plural] of [['editor', 'editors'], ['evaluator', 'evaluators']]) {
+    await f.run(`$${singular} add <@${ACTOR}>`, f.target);
+    assert.deepEqual(f.store.state.access[plural], [ACTOR]);
+    await f.run(`$${plural}`, f.target);
+    assert.ok(f.replies.at(-1).embeds[0].description.includes(ACTOR));
+    assert.deepEqual(f.replies.at(-1).allowedMentions.parse, []);
+    await f.run(`$${singular} remove <@${ACTOR}>`, f.target);
+    assert.deepEqual(f.store.state.access[plural], []);
+  }
+  const role = { id: '920000000000000000', name: 'Board staff', managed: false };
+  f.guild.roles.cache.set(role.id, role);
+  await f.run(`$staffrole add <@&${role.id}>`, f.target);
+  assert.ok(f.store.state.access.staffRoles.includes(role.id));
+  await f.run('$staffroles', f.target);
+  assert.ok(f.replies.at(-1).embeds[0].description.includes(role.id));
+  await f.run(`$staffrole remove <@&${role.id}>`, f.target);
+  assert.ok(!f.store.state.access.staffRoles.includes(role.id));
+  await f.run('$staff', f.target);
+  assert.ok(f.replies.at(-1).embeds[0].description.includes(TARGET));
+  await f.run(`$staff remove <@${TARGET}>`);
+  assert.equal(canUse(f.target, 'staff', f.store.state), false);
+  await assert.rejects(f.run(`$editor add <@${ACTOR}>`, f.target), /staff access/);
+});
+
+test('staff can approve custom ranks; evaluators assign them but cannot edit the allowlist', async t => {
+  const f = fixture(t);
+  const role = { id: '930000000000000000', name: 'Legend', hexColor: '#aabbcc', managed: false, permissions: new PermissionsBitField(), position: 5 };
+  f.guild.roles.cache.set(role.id, role);
+  f.actor.roles.cache.set(STAFF_ROLES[0], {});
+  await f.run(`$addsetrank <@&${role.id}>`);
+  await f.run(`$addsetrank <@&${role.id}>`).then(() => assert.fail('duplicate accepted'), error => assert.match(error.message, /already/));
+  f.actor.roles.cache.clear();
+  f.store.runtime(next => { next.access.evaluators.push(ACTOR); });
+  await assert.rejects(f.run(`$addsetrank <@&${role.id}>`), /staff access/);
+  for (const value of ['Legend', `<@&${role.id}>`, role.id]) {
+    await f.run(`$setrank <@${TARGET}> ${value}`);
+    assert.ok(f.target.roles.cache.has(role.id));
+    assert.ok(f.target.roles.cache.has(f.unrelated.id));
+    assert.equal(standings(f.guild, f.store.state)[0].rank, 'Legend');
+  }
+  assert.deepEqual(new Servers(f.directory).store(GUILD_ID).state.customRanks, f.store.state.customRanks);
+  await f.run(`$setrank <@${TARGET}> cas`);
+  assert.ok(!f.target.roles.cache.has(role.id));
+  await f.run(`$setrank <@${TARGET}> Legend`);
+  await f.run(`$removerank <@${TARGET}> Legend`);
+  assert.ok(!f.target.roles.cache.has(role.id));
+  await f.run(`$setrank <@${TARGET}> Legend`);
+  await f.run(`$removerank <@${TARGET}>`);
+  assert.deepEqual([...f.target.roles.cache.keys()], [f.unrelated.id]);
+  f.actor.roles.cache.set(STAFF_ROLES[0], {});
+  await f.run(`$removesetrank <@&${role.id}>`);
+  await assert.rejects(f.run(`$setrank <@${TARGET}> Legend`), /Unknown rank/);
+});
+
+test('approving a built-in alias binds its tier and rank approval rejects unsafe roles', async t => {
+  const f = fixture(t);
+  f.actor.permissions = new PermissionsBitField(PermissionFlagsBits.Administrator);
+  const role = { id: '930000000000000000', name: 'sk1', permissions: new PermissionsBitField(), managed: false, position: 2 };
+  f.guild.roles.cache.set(role.id, role);
+  await f.run(`$addsetrank <@&${role.id}>`);
+  assert.equal(f.store.state.rankRoles['Skillful I'], role.id);
+  assert.equal(f.store.state.customRanks.length, 0);
+  const privileged = { ...role, id: '930000000000000001', name: 'Powerful', permissions: new PermissionsBitField(PermissionFlagsBits.ManageRoles) };
+  f.guild.roles.cache.set(privileged.id, privileged);
+  await assert.rejects(f.run(`$addsetrank <@&${privileged.id}>`), /staff permissions/);
+  privileged.permissions = new PermissionsBitField();
+  privileged.managed = true;
+  await assert.rejects(f.run(`$addsetrank <@&${privileged.id}>`), /staff or managed/);
+  privileged.managed = false;
+  privileged.position = 100;
+  await assert.rejects(f.run(`$addsetrank <@&${privileged.id}>`), /above/);
+  privileged.position = 2;
+  f.store.runtime(next => { next.access.staffRoles.push(privileged.id); });
+  await assert.rejects(f.run(`$addsetrank <@&${privileged.id}>`), /staff or managed/);
+});
+
+test('region and device mappings can change without a deploy and stay isolated per server', async t => {
+  const f = fixture(t);
+  f.actor.roles.cache.set(STAFF_ROLES[0], {});
+  const role = { id: '930000000000000000', name: 'Region!', managed: false };
+  const device = { ...role, id: '930000000000000001', name: 'Device!' };
+  f.guild.roles.cache.set(role.id, role);
+  f.guild.roles.cache.set(device.id, device);
+  await f.run(`$regionrole North America <@&${role.id}>`);
+  await f.run(`$devicerole PC <@&${device.id}>`);
+  const reloaded = new Servers(f.directory).store(GUILD_ID).state;
+  assert.equal(reloaded.regionRoles['North America'], role.id);
+  assert.equal(reloaded.deviceRoles.PC, device.id);
+  const second = f.servers.enable(SECOND_SERVER);
+  assert.deepEqual(second.state.regionRoles, {});
+  assert.deepEqual(second.state.deviceRoles, {});
+  await assert.rejects(f.run(`$regionrole Europe <@&${role.id}>`), /already mapped/);
+  await f.run('$regionrole North America off');
+  await f.run('$devicerole PC off');
+  assert.equal(f.store.state.regionRoles['North America'], undefined);
+  assert.equal(f.store.state.deviceRoles.PC, undefined);
+});
+
+test('complete recovery restores channels, message IDs, access, mappings, and players after a fresh deployment', t => {
+  const f = fixture(t);
+  f.store.runtime(next => {
+    next.prefix = '!'; next.access.staff = [ACTOR]; next.access.editors = [TARGET];
+    next.delivery.channelId = '940000000000000000'; next.delivery.messageIds = ['950000000000000000'];
+    next.settings.logChannelId = '960000000000000000'; next.settings.limit = 42;
+    next.players[TARGET] = { name: 'Saved player', score: 1234 };
+    next.customRanks = [{ name: 'Legend', roleId: '930000000000000000', color: '#aabbcc' }];
+    next.regionRoles.Europe = '930000000000000001';
+  });
+  const id = f.store.backup();
+  const exported = f.store.readBackup(id);
+  assert.equal(exported.version, 2);
+  const fresh = new Store(path.join(f.directory, 'fresh'));
+  const previous = fresh.restoreConfiguration(ACTOR, exported);
+  assert.ok(fresh.backups().includes(previous));
+  const reloaded = new Store(fresh.directory).state;
+  assert.equal(reloaded.prefix, '!');
+  assert.deepEqual(reloaded.access, f.store.state.access);
+  assert.equal(reloaded.delivery.channelId, f.store.state.delivery.channelId);
+  assert.deepEqual(reloaded.delivery.messageIds, f.store.state.delivery.messageIds);
+  assert.equal(reloaded.delivery.fingerprint, null);
+  assert.equal(reloaded.settings.logChannelId, f.store.state.settings.logChannelId);
+  assert.equal(reloaded.settings.limit, 42);
+  assert.deepEqual(reloaded.players, f.store.state.players);
+  assert.deepEqual(reloaded.customRanks, f.store.state.customRanks);
+  assert.deepEqual(reloaded.regionRoles, f.store.state.regionRoles);
+  assert.deepEqual(reloaded.undo, []);
+  assert.throws(() => fresh.restoreConfiguration(ACTOR, { ...exported, guildId: SECOND_SERVER }), /different server/);
+  const malformed = structuredClone(exported);
+  malformed.data.settings.pageSize = 0;
+  assert.throws(() => fresh.restoreConfiguration(ACTOR, malformed), /Invalid backup/);
+  assert.equal(new Store(fresh.directory).state.settings.pageSize, 25);
+  assert.equal(fresh.readBackup(previous).configuration.prefix, '$');
+});
+
+test('complete backups reject malformed and privilege-conflicting data before saving', t => {
+  const f = fixture(t);
+  for (const edit of [
+    backup => { backup.data.customRanks.push({ name: 'fg', roleId: TARGET, color: '#aabbcc' }); },
+    backup => { backup.configuration.access.staff = ['not-an-id']; },
+    backup => { backup.data.settings.thumbnail = 'file:///etc/passwd'; },
+    backup => { backup.configuration.delivery.messageIds = 'wrong'; },
+    backup => { backup.data.rankRoles.Casual = STAFF_ROLES[0]; },
+    backup => { backup.data.regionRoles.Unlisted = TARGET; },
+  ]) {
+    const backup = f.store.backupData();
+    edit(backup);
+    assert.throws(() => validateBackup(backup, GUILD_ID), /Invalid backup/);
+  }
+});
+
+test('legacy downloaded backups restore board data while keeping current channels, access, and new mappings', t => {
+  const f = fixture(t);
+  const legacy = { version: 1, data: Object.fromEntries(['settings', 'players', 'order', 'excluded', 'rankRoles'].map(key => [key, structuredClone(f.store.state[key])])) };
+  legacy.data.settings.limit = 13;
+  legacy.data.players[TARGET] = { score: 1777 };
+  legacy.data.access = { staff: [TARGET] };
+  legacy.data.prefix = '?';
+  f.store.runtime(next => { next.delivery.channelId = '940000000000000000'; next.access.staff = [ACTOR]; next.prefix = '!'; });
+  f.store.restoreConfiguration(ACTOR, legacy);
+  assert.equal(f.store.state.settings.limit, 13);
+  assert.equal(f.store.state.players[TARGET].score, 1777);
+  assert.equal(f.store.state.delivery.channelId, '940000000000000000');
+  assert.deepEqual(f.store.state.access.staff, [ACTOR]);
+  assert.equal(f.store.state.prefix, '!');
+  assert.deepEqual(f.store.state.regionRoles, REGION_ROLES);
+});
+
+test('backup attachment import restricts downloads and validates size and JSON', async () => {
+  const attachment = { name: 'backup.json', size: 100, url: 'https://cdn.discordapp.com/attachments/1/2/backup.json?signature=value' };
+  const fetcher = async (url, options) => {
+    assert.equal(options.redirect, 'error');
+    assert.equal(url.hostname, 'cdn.discordapp.com');
+    return new Response('{"version":2}');
+  };
+  assert.deepEqual(await readBackupAttachment(attachment, fetcher), { version: 2 });
+  for (const url of ['http://cdn.discordapp.com/attachments/a', 'https://example.com/attachments/a', 'https://cdn.discordapp.com/other', 'https://user:password@cdn.discordapp.com/attachments/a']) {
+    await assert.rejects(readBackupAttachment({ ...attachment, url }, () => assert.fail('must not fetch')), /Discord JSON/);
+  }
+  await assert.rejects(readBackupAttachment({ ...attachment, size: 6000000 }, fetcher), /5 MB/);
+  await assert.rejects(readBackupAttachment(attachment, async () => new Response('bad')), /valid JSON/);
+  await assert.rejects(readBackupAttachment(attachment, async () => new Response('x'.repeat(5 * 1024 * 1024 + 1))), /5 MB/);
+});
+
+test('importbackup restores downloaded configuration through the staff command', async t => {
+  const f = fixture(t);
+  f.actor.permissions = new PermissionsBitField(PermissionFlagsBits.Administrator);
+  const backup = f.store.backupData();
+  backup.configuration.prefix = '!';
+  backup.configuration.access.staff = [ACTOR];
+  backup.data.settings.limit = 17;
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify(backup));
+  t.after(() => { globalThis.fetch = previousFetch; });
+  const message = { author: { id: ACTOR, bot: false }, guildId: GUILD_ID, guild: f.guild, content: '$importbackup',
+    attachments: { first: () => ({ name: 'backup.json', size: 1000, url: 'https://cdn.discordapp.com/attachments/1/2/backup.json' }) },
+    reply: async payload => f.replies.push(payload) };
+  await dispatch(message, f.services);
+  assert.equal(f.store.state.prefix, '!');
+  assert.equal(f.store.state.settings.limit, 17);
+  assert.deepEqual(f.store.state.access.staff, [ACTOR]);
+  assert.ok(f.replies.at(-1).content.includes('!help'));
+  assert.equal(canUse(f.actor, 'staff', f.store.state), true);
+});
+
+test('Railway volume detection uses the persistent path and warns about overrides outside it', () => {
+  const mount = path.resolve('volume');
+  assert.equal(storageInfo({ RAILWAY_VOLUME_MOUNT_PATH: mount }).directory, mount);
+  assert.equal(storageInfo({ RAILWAY_VOLUME_MOUNT_PATH: mount }).persistent, true);
+  assert.equal(storageInfo({ RAILWAY_VOLUME_MOUNT_PATH: mount, DATA_DIR: path.join(mount, 'bot') }).persistent, true);
+  const outside = storageInfo({ RAILWAY_VOLUME_MOUNT_PATH: mount, DATA_DIR: path.resolve('elsewhere'), RAILWAY_ENVIRONMENT_ID: 'production' });
+  assert.equal(outside.persistent, false);
+  assert.match(outside.warning, /NOT configured/);
+  assert.equal(storageInfo({}).directory, path.resolve('data'));
+  assert.ok(storageInfo({ RAILWAY_ENVIRONMENT_ID: 'production' }).warning);
 });

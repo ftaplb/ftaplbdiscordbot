@@ -1,6 +1,8 @@
 import { AttachmentBuilder, EmbedBuilder, PermissionFlagsBits } from 'discord.js';
-import { GUILD_ID, PREFIX, RANKS, STAFF_ROLES } from './config.js';
-import { memberRank, movePlayer, rankByName, ranksToRemove, roleMap } from './leaderboard.js';
+import { DEVICE_ROLES, GUILD_ID, PREFIX, REGION_ROLES, STAFF_ROLES } from './config.js';
+import { configuredRanks, isRankRoleName, memberLabels, memberRank, movePlayer, rankByName, ranksToRemove, roleMap } from './leaderboard.js';
+import { readBackupAttachment } from './backup.js';
+import { storageInfo } from './storage.js';
 import { chunks, number, plain, requireThat, snowflake, text, tokenize, UserError } from './util.js';
 
 export const commands = new Map();
@@ -12,7 +14,8 @@ export function canUse(member, access, state, guildId = member.guild?.id) {
   if (access === 'public') return true;
   if (access === 'admin') return member.permissions.has(PermissionFlagsBits.Administrator);
   if (access === 'homeadmin') return guildId === GUILD_ID && member.permissions.has(PermissionFlagsBits.Administrator);
-  const staff = (state?.access.staffRoles ?? STAFF_ROLES).some(id => member.roles.cache.has(id));
+  const staff = (state?.access?.staffRoles ?? STAFF_ROLES).some(id => member.roles.cache.has(id)) || (state?.access?.staff ?? []).includes(member.id);
+  if (access === 'manage') return staff || member.permissions.has(PermissionFlagsBits.Administrator);
   if (access === 'rank') return staff || (state?.access.editors ?? []).includes(member.id) || (state?.access.evaluators ?? []).includes(member.id);
   if (access === 'editor') return staff || (state?.access.editors ?? []).includes(member.id);
   return staff;
@@ -74,7 +77,13 @@ const unsafePermissions = [
 export function safeRankRole(role, guild, me, staffRoles = STAFF_ROLES) {
   requireThat(role && role.id !== guild.id && !role.managed && ![...STAFF_ROLES, ...staffRoles].includes(role.id), 'Choose an ordinary rank role, not a staff or managed role.');
   requireThat(!unsafePermissions.some(permission => role.permissions.has(permission, false)), 'Rank roles must not grant staff permissions.');
-  if (me) requireThat(role.position < me.roles.highest.position, 'Move my bot role above all 12 rank roles.');
+  if (me) requireThat(role.position < me.roles.highest.position, 'Move my bot role above the configured rank roles.');
+}
+
+function requestedRank(ctx, value) {
+  const id = String(value).replace(/^<@&(\d+)>$/, '$1');
+  const roles = roleMap(ctx.guild, ctx.store.state);
+  return configuredRanks(ctx.store.state).find(rank => roles.get(rank.name)?.id === id) ?? rankByName(value, ctx.store.state);
 }
 
 async function setRank(ctx, target, rank) {
@@ -105,7 +114,7 @@ const rowLine = row => `**${row.position}.** ${plain(row.name).slice(0, 60)} · 
 command('help', 'Start here', '[command or category]', 'Show every command, or help for one command.', async ctx => {
   const query = ctx.args.join(' ').toLowerCase();
   const entry = commands.get(query.startsWith(ctx.prefix.toLowerCase()) ? query.slice(ctx.prefix.length) : query);
-  const labels = { staff: 'Staff role', admin: 'Administrator', homeadmin: 'Home-server administrator', editor: 'Editor or staff', rank: 'Evaluator, editor, or staff', public: 'Everyone' };
+  const labels = { staff: 'Staff member or staff role', manage: 'Staff or administrator', admin: 'Administrator', homeadmin: 'Home-server administrator', editor: 'Editor or staff', rank: 'Evaluator, editor, or staff', public: 'Everyone' };
   if (entry) {
     await list(ctx, `$${entry.name}`, [entry.description, `Usage: \`$${entry.name}${entry.usage ? ` ${entry.usage}` : ''}\``, `Access: ${labels[entry.access]}`]);
     return;
@@ -114,10 +123,10 @@ command('help', 'Start here', '[command or category]', 'Show every command, or h
   requireThat(!query || categories.some(name => name.toLowerCase() === query), 'Use $help or $help <command>.');
   const selected = [...commands.values()].filter(item => !query || item.category.toLowerCase() === query);
   const embed = new EmbedBuilder().setColor(ctx.store.state.settings.color).setTitle('FTAP commands')
-    .setDescription('Use `$help command` for details.\nEvaluators: `$setrank`, `$removerank` only, plus public commands.\nEditors can also use `$rank`, `$promote`, `$demote`.\nSettings and access commands require Administrator.');
+    .setDescription('Use `$help command` for usage and access.\nEvaluators: `$setrank`, `$removerank`, plus public commands.\nEditors can also use `$rank`, `$promote`, `$demote`.\nStaff manage the board, access lists, rank roles, regions, and devices. Administrators can bootstrap staff access.');
   for (const category of categories) {
     const entries = selected.filter(item => item.category === category);
-    for (const [index, group] of chunks(entries, 10).entries()) embed.addFields({ name: category + (index ? ' (continued)' : ''), value: group.map(item => `\`$${item.name}${item.usage ? ` ${item.usage}` : ''}\``).join('\n') });
+    for (const [index, group] of chunks(entries, 15).entries()) embed.addFields({ name: category + (index ? ' (continued)' : ''), value: group.map(item => `\`$${item.name}\``).join(' · ') });
   }
   await reply(ctx.message, { embeds: [embed] });
 }, 'public');
@@ -126,7 +135,7 @@ command('setchannel', 'Start here', '<channel ID>', 'Choose the channel for the 
   const id = snowflake(ctx.args[0]);
   await ctx.board.setChannel(id, ctx.actor.id);
   await reply(ctx.message, `Leaderboard channel set to <#${id}>.`);
-}, 'admin');
+}, 'manage');
 
 command('participants', 'Start here', '<1–100>', 'Set the maximum number of players displayed.', async ctx => {
   const limit = number(ctx.args[0], 1, 100, 'Participants');
@@ -136,7 +145,7 @@ command('participants', 'Start here', '<1–100>', 'Set the maximum number of pl
 
 command('leaderboard', 'Board', '', 'Link to the live leaderboard.', async ctx => {
   const { channelId, messageIds } = ctx.store.state.delivery;
-  requireThat(channelId && messageIds.length, 'An administrator needs to run $setchannel <id> first.');
+  requireThat(channelId && messageIds.length, 'Staff or an administrator needs to run $setchannel <id> first.');
   await reply(ctx.message, `https://discord.com/channels/${ctx.guild.id}/${channelId}/${messageIds[0]}`);
 });
 command('refresh', 'Board', '', 'Rebuild the live board now, including while paused.', async ctx => {
@@ -155,6 +164,7 @@ command('status', 'Board', '', 'Show connection, update, and participant status.
     `Ranked members: ${ctx.board.rows().length} · Display limit: ${state.settings.limit}`,
     `Last update: ${state.delivery.updatedAt ?? 'not posted yet'}`,
     `Last board error: ${ctx.board.lastError ?? 'none'}`,
+    `Storage: ${storageInfo().status}`,
   ]);
 });
 for (const [name, paused] of [['pause', true], ['resume', false]]) command(name, 'Board', '', `${paused ? 'Pause' : 'Resume'} automatic leaderboard updates.`, async ctx => {
@@ -188,8 +198,8 @@ command('pagesize', 'Board', '<10–50>', 'Set the number of players per leaderb
 
 command('add', 'Players', '<@member> [rank]', 'Include a member, optionally assigning a rank.', async ctx => {
   const target = await member(ctx, ctx.args[0]);
-  if (ctx.args.length > 1) await setRank(ctx, target, rankByName(ctx.args.slice(1).join(' ')));
-  else requireThat(memberRank(target, roleMap(ctx.guild, ctx.store.state)), 'That member needs one of the 12 rank roles. Example: $add @member Expert II');
+  if (ctx.args.length > 1) await setRank(ctx, target, requestedRank(ctx, ctx.args.slice(1).join(' ')));
+  else requireThat(memberRank(target, roleMap(ctx.guild, ctx.store.state), ctx.store.state), 'That member needs a configured rank role. Example: $add @member Expert II');
   playerChange(ctx, target, 'add', (_, next) => { next.excluded = next.excluded.filter(id => id !== target.id); });
   await reply(ctx.message, `${plain(target.displayName)} is included.`);
 });
@@ -207,10 +217,12 @@ command('player', 'Players', '<@member>', 'Show a player’s rank, position, and
   const target = await member(ctx, ctx.args[0]);
   const row = ctx.board.rows().find(item => item.id === target.id);
   const profile = ctx.store.state.players[target.id] ?? {};
-  const rank = memberRank(target, roleMap(ctx.guild, ctx.store.state));
+  const rank = memberRank(target, roleMap(ctx.guild, ctx.store.state), ctx.store.state);
   await list(ctx, plain(profile.name || target.displayName), [
     `Rank: ${rank?.name ?? 'unranked'}`,
     `Position: ${row?.position ?? 'not on board'}`,
+    `Region: ${memberLabels(target, ctx.store.state.regionRoles) || '—'}`,
+    `Device: ${memberLabels(target, ctx.store.state.deviceRoles) || '—'}`,
     `Roblox: ${plain(profile.roblox || 'not linked')}`,
     `Recorded score: ${profile.score ?? 0}`,
     `Recorded wins / losses: ${profile.wins ?? 0} / ${profile.losses ?? 0}`,
@@ -230,17 +242,17 @@ command('roblox', 'Players', '<@member> <username | off>', 'Record a Roblox user
   playerChange(ctx, target, 'roblox', profile => { profile.roblox = username === 'off' ? null : username; });
   await reply(ctx.message, username === 'off' ? 'Roblox username removed.' : 'Roblox username saved.');
 });
-command('rank', 'Players', '<@member> <rank>', 'Assign one of the 12 ranks and remove their other rank roles.', async ctx => {
+command('rank', 'Players', '<@member> <rank>', 'Assign a configured rank and remove their other rank roles.', async ctx => {
   const target = await member(ctx, ctx.args[0]);
-  const rank = rankByName(ctx.args.slice(1).join(' '));
+  const rank = requestedRank(ctx, ctx.args.slice(1).join(' '));
   await setRank(ctx, target, rank);
   await reply(ctx.message, `${plain(target.displayName)} → ${rank.name}.`);
 }, 'editor');
 for (const [name, offset] of [['promote', -1], ['demote', 1]]) command(name, 'Players', '<@member>', `${name === 'promote' ? 'Raise' : 'Lower'} a member by one rank.`, async ctx => {
   const target = await member(ctx, ctx.args[0]);
-  const current = memberRank(target, roleMap(ctx.guild, ctx.store.state));
+  const current = memberRank(target, roleMap(ctx.guild, ctx.store.state), ctx.store.state);
   requireThat(current, 'That member has no rank. Use $rank first.');
-  const next = RANKS[current.index + offset];
+  const next = configuredRanks(ctx.store.state)[current.index + offset];
   requireThat(next, `Already at the ${offset < 0 ? 'highest' : 'lowest'} rank.`);
   await setRank(ctx, target, next);
   await reply(ctx.message, `${plain(target.displayName)} → ${next.name}.`);
@@ -317,15 +329,15 @@ command('compare', 'Ordering', '<@member> <@member>', 'Compare two members’ ra
 
 command('ranks', 'Ranks', '', 'Show the exact rank order and mapped role IDs.', async ctx => {
   const roles = roleMap(ctx.guild, ctx.store.state);
-  await list(ctx, 'Ranks · best to worst', RANKS.map(rank => `${rank.index + 1}. **${rank.name}** · ${roles.get(rank.name)?.id ?? 'missing or ambiguous — use $rankrole'}`));
-});
+  await list(ctx, 'Ranks · best to worst', configuredRanks(ctx.store.state).map(rank => `${rank.index + 1}. **${plain(rank.name)}** · ${roles.get(rank.name)?.id ?? 'missing or ambiguous — use $rankrole'}`));
+}, 'public');
 command('rankrole', 'Ranks', '<rank> <role ID>', 'Bind one of the 12 ranks to its Discord role.', async ctx => {
   const roleId = snowflake(ctx.args.at(-1));
   const rank = rankByName(ctx.args.slice(0, -1).join(' '));
   const role = await ctx.guild.roles.fetch(roleId);
   safeRankRole(role, ctx.guild, null, ctx.store.state.access.staffRoles);
   const roles = roleMap(ctx.guild, ctx.store.state);
-  requireThat(!RANKS.some(other => other.name !== rank.name && roles.get(other.name)?.id === roleId), 'That role is already used by another rank.');
+  requireThat(!configuredRanks(ctx.store.state).some(other => other.name !== rank.name && roles.get(other.name)?.id === roleId), 'That role is already used by another rank.');
   ctx.store.change(ctx.actor.id, `rankrole ${rank.name} ${roleId}`, next => { next.rankRoles[rank.name] = roleId; });
   ctx.schedule();
   await reply(ctx.message, `${rank.name} linked to role ${roleId}.`);
@@ -337,19 +349,20 @@ command('rankclear', 'Ranks', '<rank>', 'Remove a role override and return to ex
   await reply(ctx.message, `${rank.name} now matches its exact role name.`);
 });
 command('rankmembers', 'Ranks', '<rank>', 'List players whose highest rank is the given rank.', async ctx => {
-  const rank = rankByName(ctx.args.join(' '));
+  const rank = requestedRank(ctx, ctx.args.join(' '));
   await list(ctx, rank.name, ctx.board.rows().filter(row => row.rank === rank.name).map(rowLine));
 });
 command('rankstats', 'Ranks', '', 'Show participant counts per highest rank.', async ctx => {
   const rows = ctx.board.rows();
-  await list(ctx, 'Rank distribution', RANKS.map(rank => `${rank.name}: **${rows.filter(row => row.rank === rank.name).length}**`));
+  await list(ctx, 'Rank distribution', configuredRanks(ctx.store.state).map(rank => `${plain(rank.name)}: **${rows.filter(row => row.rank === rank.name).length}**`));
 });
 
-command('settings', 'Settings', '', 'Show board settings and fixed access roles.', async ctx => {
+command('settings', 'Settings', '', 'Show saved board settings and staff access.', async ctx => {
   const state = ctx.store.state;
   await list(ctx, 'Board settings', [
     `Server: ${ctx.guild.id}`, `Channel: ${state.delivery.channelId ?? 'not set'}`,
     `Prefix: ${state.prefix}`, `Staff roles: ${state.access.staffRoles.join(', ') || 'none'}`,
+    `Staff members: ${state.access.staff.join(', ') || 'none'}`,
     ...Object.entries(state.settings).map(([key, value]) => `${key}: ${plain(value ?? 'off')}`),
   ]);
 });
@@ -379,14 +392,13 @@ command('export', 'Data', '', 'Download the full standings as CSV.', async ctx =
     return `"${result.replace(/"/g, '""')}"`;
   };
   const rows = ctx.board.rows();
-  const header = ['position', 'discord_id', 'name', 'roblox', 'rank', 'rating', 'rd', 'country', 'clan', 'wins', 'losses'];
-  const csv = [header.join(','), ...rows.map(row => [row.position, row.id, row.name, row.roblox, row.rank, row.rating ?? '', row.rd ?? '', row.country, row.clan, row.wins, row.losses].map(escape).join(','))].join('\r\n');
+  const header = ['position', 'discord_id', 'name', 'roblox', 'rank', 'region', 'device', 'wins', 'losses'];
+  const csv = [header.join(','), ...rows.map(row => [row.position, row.id, row.name, row.roblox, row.rank, row.region, row.device, row.wins, row.losses].map(escape).join(','))].join('\r\n');
   await reply(ctx.message, { files: [new AttachmentBuilder(Buffer.from(`\ufeff${csv}`), { name: 'ftap-leaderboard.csv' })] });
 });
-command('backup', 'Data', '', 'Save a local backup and download its JSON copy.', async ctx => {
+command('backup', 'Data', '', 'Download a complete backup, including channels, access, prefix, and role mappings.', async ctx => {
   const id = ctx.store.backup();
-  const { snapshot } = await import('./store.js');
-  await reply(ctx.message, { content: `Backup saved: ${id}`, files: [new AttachmentBuilder(Buffer.from(JSON.stringify({ version: 1, data: snapshot(ctx.store.state) }, null, 2)), { name: `ftap-backup-${id}.json` })] });
+  await reply(ctx.message, { content: `Complete backup saved: ${id}. Keep this file for recovery after a redeploy.`, files: [new AttachmentBuilder(Buffer.from(JSON.stringify(ctx.store.readBackup(id), null, 2)), { name: `ftap-backup-${id}.json` })] });
 });
 command('backups', 'Data', '', 'List the 30 most recent local backups.', async ctx => {
   await list(ctx, 'Saved backups', ctx.store.backups().map(id => `${id} · ${new Date(Number(id)).toISOString()}`));
@@ -411,16 +423,17 @@ command('resetstats', 'Data', '<@member>', 'Reset one player’s recorded score,
   await reply(ctx.message, 'Recorded stats reset. $undo can restore them.');
 });
 
-command('setrank', 'Ranks', '<@member> <rank or alias>', 'Set one of the 12 game ranks, e.g. skillful 1, sk1, adv3, or fg.', async ctx => {
+command('setrank', 'Ranks', '<@member> <rank, alias, or @role>', 'Assign a configured game rank. Staff can extend the list with $addsetrank.', async ctx => {
   const target = await member(ctx, ctx.args[0]);
-  const rank = rankByName(ctx.args.slice(1).join(' '));
+  const rank = requestedRank(ctx, ctx.args.slice(1).join(' '));
   await setRank(ctx, target, rank);
   await reply(ctx.message, `${plain(target.displayName)} → ${rank.name}.`);
 }, 'rank');
 
 command('removerank', 'Ranks', '<@member> [rank, family, or all]', 'Remove game rank roles only. Use skillful to remove Skillful I–III.', async ctx => {
   const target = await member(ctx, ctx.args[0]);
-  const selected = ranksToRemove(ctx.args.slice(1).join(' '));
+  const value = ctx.args.slice(1).join(' ');
+  const selected = /^<@&\d+>$|^\d{17,20}$/.test(value) ? [requestedRank(ctx, value)] : ranksToRemove(value, ctx.store.state);
   await ctx.guild.roles.fetch();
   const me = await ctx.guild.members.fetchMe();
   requireThat(me.permissions.has(PermissionFlagsBits.ManageRoles), 'I need Manage Roles to remove ranks.');
@@ -466,32 +479,40 @@ command('servers', 'Servers', '', 'List enabled servers and connection status.',
   }));
 }, 'homeadmin');
 
-for (const [singular, plural] of [['editor', 'editors'], ['evaluator', 'evaluators']]) {
-  command(`add${singular}`, 'Access', '<@member or user ID>', `Allow a member to ${singular === 'evaluator' ? 'use setrank and removerank only' : 'use game rank editing commands'}.`, async ctx => {
-    const target = await member(ctx, ctx.args[0]);
-    ctx.store.runtime(next => {
-      next.access[plural] = [...new Set([...next.access[plural], target.id])];
-      ctx.store.record(next, ctx.actor.id, `add${singular} ${target.id}`);
-    });
-    await reply(ctx.message, `${plain(target.displayName)} added as ${singular} in this server.`);
-  }, 'admin');
-  command(`remove${singular}`, 'Access', '<@member or user ID>', `Revoke a member’s ${singular} access.`, async ctx => {
-    const id = snowflake(ctx.args[0]);
-    ctx.store.runtime(next => {
-      next.access[plural] = next.access[plural].filter(item => item !== id);
-      ctx.store.record(next, ctx.actor.id, `remove${singular} ${id}`);
-    });
-    await reply(ctx.message, `${singular[0].toUpperCase()}${singular.slice(1)} access removed.`);
-  }, 'admin');
-  command(plural, 'Access', '', `List this server’s ${plural}.`, async ctx => {
-    await list(ctx, plural[0].toUpperCase() + plural.slice(1), ctx.store.state.access[plural].map(id => `${plain(ctx.guild.members.cache.get(id)?.displayName || 'Member')} · ${id}`));
-  }, 'admin');
+async function accessMember(ctx, singular, plural, mode, value) {
+  requireThat(['add', 'remove'].includes(mode), `Use $${singular} add @member or $${singular} remove @member.`);
+  const id = mode === 'add' ? (await member(ctx, value)).id : snowflake(value);
+  ctx.store.runtime(next => {
+    next.access[plural] = next.access[plural].filter(item => item !== id);
+    if (mode === 'add') next.access[plural].push(id);
+    ctx.store.record(next, ctx.actor.id, `${singular} ${mode} ${id}`);
+  });
+  await reply(ctx.message, `${singular[0].toUpperCase()}${singular.slice(1)} access ${mode === 'add' ? 'added' : 'removed'} for <@${id}>.`);
 }
 
-command('staffrole', 'Access', '<role ID> [add or remove]', 'Configure local staff access to board, player-data, and backup commands.', async ctx => {
-  const id = snowflake(ctx.args[0]);
-  const mode = ctx.args[1] || 'add';
-  requireThat(['add', 'remove'].includes(mode), 'Use $staffrole <role ID> add or remove.');
+async function listAccess(ctx, key, label) {
+  await list(ctx, label, ctx.store.state.access[key].map(id => `${plain(ctx.guild.members.cache.get(id)?.displayName || 'Member')} · <@${id}> · ${id}`));
+}
+
+for (const [singular, plural] of [['staff', 'staff'], ['editor', 'editors'], ['evaluator', 'evaluators']]) {
+  command(singular, 'Access', '<add | remove> <@member>', `Grant or revoke ${singular} access in this server.`, async ctx => {
+    if (singular === 'staff' && !ctx.args.length) return listAccess(ctx, plural, 'Staff members');
+    await accessMember(ctx, singular, plural, ctx.args[0]?.toLowerCase(), ctx.args[1]);
+  }, 'manage');
+  if (singular !== 'staff') command(plural, 'Access', '', `List this server’s ${plural}.`, ctx => listAccess(ctx, plural, plural[0].toUpperCase() + plural.slice(1)), 'manage');
+  // Keep the original command names working alongside the new add/remove syntax.
+  for (const mode of ['add', 'remove']) command(`${mode}${singular}`, 'Access', '<@member or user ID>', `Alias for $${singular} ${mode}.`, ctx => accessMember(ctx, singular, plural, mode, ctx.args[0]), 'manage');
+}
+
+command('staffroles', 'Access', '', 'List the roles that grant staff access.', async ctx => {
+  await list(ctx, 'Staff roles', ctx.store.state.access.staffRoles.map(id => `${plain(ctx.guild.roles.cache.get(id)?.name || 'Missing role')} · <@&${id}> · ${id}`));
+}, 'manage');
+
+command('staffrole', 'Access', '<add | remove> <@role>', 'Grant or revoke staff access for a role. The old role-first syntax also works.', async ctx => {
+  const first = ctx.args[0]?.toLowerCase();
+  const mode = ['add', 'remove'].includes(first) ? first : (ctx.args[1]?.toLowerCase() || 'add');
+  const id = snowflake(['add', 'remove'].includes(first) ? ctx.args[1] : ctx.args[0]);
+  requireThat(['add', 'remove'].includes(mode), 'Use $staffrole add @role or $staffrole remove @role.');
   if (mode === 'add') {
     const role = await ctx.guild.roles.fetch(id);
     requireThat(role && role.id !== ctx.guild.id && !role.managed, 'Choose an ordinary staff role, not @everyone or a managed role.');
@@ -503,7 +524,7 @@ command('staffrole', 'Access', '<role ID> [add or remove]', 'Configure local sta
     ctx.store.record(next, ctx.actor.id, `staffrole ${mode} ${id}`);
   });
   await reply(ctx.message, `Staff role ${mode === 'add' ? 'added' : 'removed'}.`);
-}, 'admin');
+}, 'manage');
 
 command('prefix', 'Settings', '<prefix>', 'Change this server’s command prefix.', async ctx => {
   const prefix = ctx.args[0] ?? '';
@@ -513,24 +534,23 @@ command('prefix', 'Settings', '<prefix>', 'Change this server’s command prefix
     ctx.store.record(next, ctx.actor.id, `prefix ${prefix}`);
   });
   await reply(ctx.message, `Prefix set to \`${prefix}\`. Use \`${prefix}help\`.`, true);
-}, 'admin');
+}, 'manage');
 
-command('playerprofile', 'Profiles', '[@member]', 'Show a member’s rank, Roblox name, rating, country, clan, and recorded stats.', async ctx => {
+command('playerprofile', 'Profiles', '[@member]', 'Show a member’s rank, region, device, Roblox name, and wins/losses.', async ctx => {
   const target = await member(ctx, ctx.args[0] || ctx.actor.id);
   const state = ctx.store.state;
   const profile = state.players[target.id] ?? {};
-  const rank = memberRank(target, roleMap(ctx.guild, state));
+  const rank = memberRank(target, roleMap(ctx.guild, state), state);
   const row = ctx.board.rows().find(item => item.id === target.id);
   const embed = new EmbedBuilder().setColor(state.settings.color).setTitle(plain(profile.name || target.displayName))
     .addFields(
       { name: 'Rank', value: rank?.name || 'Unranked', inline: true },
       { name: 'Position', value: row ? `#${row.position}` : 'Not on board', inline: true },
       { name: 'Roblox', value: plain(profile.roblox || 'Not linked'), inline: true },
-      { name: 'Rating / RD', value: `${profile.score ?? '—'} / ${profile.rd ?? '—'}`, inline: true },
-      { name: 'Country', value: plain(profile.country || '—'), inline: true },
-      { name: 'Clan', value: plain(profile.clan || '—'), inline: true },
+      { name: 'Region', value: memberLabels(target, state.regionRoles) || '—', inline: true },
+      { name: 'Device', value: memberLabels(target, state.deviceRoles) || '—', inline: true },
       { name: 'Wins / Losses', value: `${profile.wins ?? 0} / ${profile.losses ?? 0}`, inline: true },
-    ).setFooter({ text: `Discord ID: ${target.id} · Stats entered by staff` });
+    ).setFooter({ text: `Discord ID: ${target.id} · Region and device follow Discord roles` });
   if (target.displayAvatarURL) embed.setThumbnail(target.displayAvatarURL());
   await reply(ctx.message, { embeds: [embed] });
 }, 'public');
@@ -549,6 +569,86 @@ for (const [name, maximum] of [['country', 40], ['clan', 16]]) command(name, 'Pr
   await reply(ctx.message, `${name[0].toUpperCase()}${name.slice(1)} ${result ? 'updated' : 'cleared'}.`);
 });
 
+command('addsetrank', 'Ranks', '<@role> [display name]', 'Allow editors/evaluators to assign a safe role. New ranks appear below the existing ranks.', async ctx => {
+  const id = snowflake(ctx.args[0]);
+  await ctx.guild.roles.fetch();
+  const role = ctx.guild.roles.cache.get(id);
+  const me = await ctx.guild.members.fetchMe();
+  requireThat(me.permissions.has(PermissionFlagsBits.ManageRoles), 'I need Manage Roles to change ranks.');
+  safeRankRole(role, ctx.guild, me, ctx.store.state.access.staffRoles);
+  const name = text(ctx.args.slice(1).join(' ') || role.name, 48, 'Rank name');
+  requireThat(!['all', 'sk', 'skillful', 'e', 'expert', 'adv', 'advanced'].includes(name.toLowerCase()), 'Choose a rank name that is not a removal-family keyword.');
+  // Only exact base names/aliases bind existing tiers; typo correction is for commands only.
+  const existing = isRankRoleName(name) ? rankByName(name) : null;
+  const used = [...roleMap(ctx.guild, ctx.store.state)].find(([, candidate]) => candidate?.id === id);
+  requireThat(!used || used[0] === existing?.name, 'That role is already configured. Use $ranks to see it.');
+  const normalized = value => value.toLowerCase().replace(/[\s_-]+/g, '');
+  requireThat(!ctx.store.state.customRanks.some(rank => normalized(rank.name) === normalized(name)), 'That rank name already exists.');
+  requireThat(existing || ctx.store.state.customRanks.length < 50, 'At most 50 custom ranks can be configured.');
+  ctx.store.change(ctx.actor.id, `addsetrank ${id}: ${name}`, next => {
+    if (existing) next.rankRoles[existing.name] = id;
+    else next.customRanks.push({ name, roleId: id, color: /^#[0-9a-f]{6}$/i.test(role.hexColor) ? role.hexColor : '#acb5c4' });
+  });
+  ctx.schedule();
+  await reply(ctx.message, `${plain(existing?.name || name)} is available through $setrank. Use $ranks to see the order.`);
+}, 'manage');
+
+command('removesetrank', 'Ranks', '<@role or custom rank name>', 'Remove a custom rank from the board and setrank list; keep members’ Discord roles.', async ctx => {
+  const rank = requestedRank(ctx, ctx.args.join(' '));
+  requireThat(rank.roleId, 'This is a built-in tier. Use $rankrole or $rankclear to change its mapping.');
+  ctx.store.change(ctx.actor.id, `removesetrank ${rank.roleId}`, next => { next.customRanks = next.customRanks.filter(item => item.roleId !== rank.roleId); });
+  ctx.schedule();
+  await reply(ctx.message, `${plain(rank.name)} removed from the configured ranks. Discord roles are unchanged.`);
+}, 'manage');
+
+for (const [singular, plural, key, choices] of [['region', 'regions', 'regionRoles', REGION_ROLES], ['device', 'devices', 'deviceRoles', DEVICE_ROLES]]) {
+  command(plural, 'Role tracking', '', `Show configured ${singular} roles. Multiple matches are shown together.`, async ctx => {
+    await list(ctx, `${plural[0].toUpperCase()}${plural.slice(1)}`, Object.keys(choices).map(label => {
+      const id = ctx.store.state[key][label];
+      return `**${label}** · ${id ? `<@&${id}> · ${id}${ctx.guild.roles.cache.has(id) ? '' : ' (missing)'}` : 'off'}`;
+    }));
+  }, 'public');
+  command(`${singular}role`, 'Role tracking', `<${singular} name> <@role | off>`, `Change a tracked ${singular} role without redeploying.`, async ctx => {
+    const label = Object.keys(choices).find(name => name.toLowerCase() === ctx.args.slice(0, -1).join(' ').toLowerCase());
+    requireThat(label, `Choose a ${singular} from: ${Object.keys(choices).join(', ')}.`);
+    const value = ctx.args.at(-1);
+    const id = value?.toLowerCase() === 'off' ? null : snowflake(value);
+    if (id) {
+      const role = await ctx.guild.roles.fetch(id);
+      requireThat(role && role.id !== ctx.guild.id && !role.managed, 'Choose an ordinary member role.');
+      requireThat(!Object.entries(ctx.store.state[key]).some(([name, roleId]) => name !== label && roleId === id), 'That role is already mapped to another label.');
+    }
+    ctx.store.change(ctx.actor.id, `${singular}role ${label}: ${id || 'off'}`, next => {
+      if (id) next[key][label] = id; else delete next[key][label];
+    });
+    ctx.schedule();
+    await reply(ctx.message, `${label} tracking ${id ? `set to <@&${id}>` : 'turned off'}.`);
+  }, 'manage');
+}
+
+command('storage', 'Data', '', 'Check the storage path and whether a Railway volume is configured.', async ctx => {
+  const info = storageInfo();
+  await list(ctx, 'Saved data', [info.status, `Directory: ${plain(ctx.store.directory)}`,
+    'Every successful settings/access change and posted message ID is saved immediately.',
+    'Complete local backups are made daily when the bot saves data. $backup downloads a recovery copy.',
+    'Use $restoreconfig <backup ID> or attach a complete JSON file to $importbackup to recover channels and access too.']);
+}, 'manage');
+
+async function restoreConfiguration(ctx, payload) {
+  const previous = ctx.store.restoreConfiguration(ctx.actor.id, payload);
+  ctx.schedule();
+  const result = payload.version === 1 ? 'Legacy board/player data restored. This older backup has no channels, access, or prefix; current choices were kept.'
+    : 'Complete configuration restored, including channels, access, and prefix.';
+  await reply(ctx.message, `${result} Previous configuration saved as backup ${previous}. Use \`${ctx.store.state.prefix}help\`.`, true);
+}
+command('restoreconfig', 'Data', '<backup ID>', 'Restore a complete local backup, including channel, prefix, access, and role mappings.', async ctx => {
+  await restoreConfiguration(ctx, ctx.store.readBackup(ctx.args[0]));
+}, 'manage');
+command('importbackup', 'Data', '(attach JSON file)', 'Restore a downloaded backup. Version 2 includes channels/access; legacy files restore board data only.', async ctx => {
+  const payload = await readBackupAttachment(ctx.message.attachments?.first());
+  await restoreConfiguration(ctx, payload);
+}, 'manage');
+
 export async function dispatch(message, services) {
   if (message.author.bot || !message.guildId) return;
   if (services.servers ? !services.servers.enabled(message.guildId) : message.guildId !== GUILD_ID) return;
@@ -563,7 +663,7 @@ export async function dispatch(message, services) {
   }
   // Fetch current permissions instead of trusting a cached staff role after removal.
   const actor = await message.guild.members.fetch({ user: message.author.id, force: true });
-  const denied = { admin: 'You need Administrator permission for that command.', homeadmin: 'Only a home-server administrator can manage enabled servers.', rank: 'You need evaluator, editor, or staff access.', editor: 'You need editor or staff access.', staff: 'You need a configured staff role to use that command.' };
+  const denied = { manage: 'You need staff access or Administrator permission for that command.', admin: 'You need Administrator permission for that command.', homeadmin: 'Only a home-server administrator can manage enabled servers.', rank: 'You need evaluator, editor, or staff access.', editor: 'You need editor or staff access.', staff: 'You need a configured staff role or individual staff access to use that command.' };
   requireThat(canUse(actor, entry.access, services.store?.state, message.guildId), denied[entry.access]);
   const now = Date.now();
   const cooldownKey = `${message.guildId}:${actor.id}`;

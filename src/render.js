@@ -11,12 +11,10 @@ const clip = (value, length) => {
 export function cardSvg(rows, settings, { page = 1, pages = 1, total = rows.length, updatedAt = new Date() } = {}) {
   const columns = [
     { label: '#', width: 55, key: 'position', max: 3 },
-    { label: 'Player', width: 250, key: 'name', max: 24 },
-    { label: 'Rank', width: 160, key: 'rank', max: 16 },
-    { label: 'Rating', width: 100, key: 'rating', max: 10 },
-    { label: 'RD', width: 65, key: 'rd', max: 5 },
-    { label: 'Country', width: 235, key: 'country', max: 25 },
-    { label: 'Clan', width: 135, key: 'clan', max: 12 },
+    { label: 'Player', width: 280, key: 'name', max: 27 },
+    { label: 'Rank', width: 205, key: 'rank', max: 21 },
+    { label: 'Region', width: 240, key: 'region', max: 24 },
+    { label: 'Device', width: 220, key: 'device', max: 22 },
   ];
   const width = columns.reduce((sum, column) => sum + column.width, 0);
   const headerHeight = 34;
@@ -62,7 +60,7 @@ export async function renderPage(rows, settings, meta) {
   const embed = new EmbedBuilder().setColor(settings.color).setImage(`attachment://${name}`);
   if (meta.page === 1) embed.setTitle(plain(settings.title)).setDescription(plain(settings.description));
   if (settings.thumbnail) embed.setThumbnail(settings.thumbnail);
-  const description = rows.length ? rows.map(row => `${row.position}. ${row.name} — ${row.rank}${row.roblox ? ` (${row.roblox})` : ''}`).join('\n').slice(0, 1024) : 'No ranked members yet.';
+  const description = rows.length ? rows.map(row => `${row.position}. ${row.name} — ${row.rank} · ${row.region || '—'} · ${row.device || '—'}`).join('\n').slice(0, 1024) : 'No ranked members yet.';
   return { embeds: [embed], files: [new AttachmentBuilder(png, { name, description })], allowedMentions: { parse: [] } };
 }
 

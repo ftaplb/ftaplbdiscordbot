@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import sharp from 'sharp';
 import { ChannelType, PermissionFlagsBits, PermissionsBitField } from 'discord.js';
-import { defaults, GUILD_ID, RANKS, STAFF_ROLES } from '../src/config.js';
+import { defaults, DEVICE_ROLES, GUILD_ID, RANKS, REGION_ROLES, STAFF_ROLES } from '../src/config.js';
 import { canUse, commands, dispatch, safeRankRole } from '../src/commands.js';
 import { memberChangeAffectsBoard, movePlayer, standings } from '../src/leaderboard.js';
 import { Board } from '../src/board.js';
@@ -69,6 +69,45 @@ test('adding and removing screenshot rank roles changes the board; unrelated rol
   assert.equal(standings(f.guild, f.state).length, 0);
 });
 
+test('every supplied region and device role is read from roles and updates ranked members immediately', () => {
+  const f = fixture();
+  const person = f.member('1', 3);
+  assert.equal(standings(f.guild, f.state)[0].region, '');
+  assert.equal(standings(f.guild, f.state)[0].device, '');
+  for (const [key, mappings] of [['region', REGION_ROLES], ['device', DEVICE_ROLES]]) {
+    for (const [label, id] of Object.entries(mappings)) {
+      const before = { ...person, roles: { cache: new Map(person.roles.cache) } };
+      person.roles.cache.set(id, { id, name: 'Renamed Discord role' });
+      assert.equal(standings(f.guild, f.state)[0][key], label);
+      assert.equal(memberChangeAffectsBoard(before, person, f.state), true);
+      const withLabel = { ...person, roles: { cache: new Map(person.roles.cache) } };
+      person.roles.cache.delete(id);
+      assert.equal(memberChangeAffectsBoard(withLabel, person, f.state), true);
+      assert.equal(standings(f.guild, f.state)[0][key], '');
+    }
+  }
+  person.roles.cache.set(REGION_ROLES.Europe, {});
+  person.roles.cache.set(REGION_ROLES.Asia, {});
+  person.roles.cache.set(DEVICE_ROLES.PC, {});
+  person.roles.cache.set(DEVICE_ROLES.Mobile, {});
+  assert.equal(standings(f.guild, f.state)[0].region, 'Asia / Europe');
+  assert.equal(standings(f.guild, f.state)[0].device, 'PC / Mobile');
+  const unranked = f.member('2', null);
+  const before = { ...unranked, roles: { cache: new Map() } };
+  unranked.roles.cache.set(REGION_ROLES.Europe, {});
+  assert.equal(memberChangeAffectsBoard(before, unranked, f.state), false);
+});
+
+test('the board renders only position, player, rank, region, and device', () => {
+  const f = fixture(1);
+  const person = [...f.guild.members.cache.values()][0];
+  person.roles.cache.set(REGION_ROLES['North America'], {});
+  person.roles.cache.set(DEVICE_ROLES.Laptop, {});
+  const svg = cardSvg(standings(f.guild, f.state), f.state.settings);
+  for (const label of ['#', 'Player', 'Rank', 'Region', 'Device', 'North America', 'Laptop']) assert.ok(svg.includes(`>${label}</text>`), label);
+  for (const label of ['Rating', 'RD', 'Country', 'Clan']) assert.ok(!svg.includes(`>${label}</text>`), label);
+});
+
 test('exact-name matching rejects ambiguous roles and accepts explicit mappings', () => {
   const f = fixture();
   f.guild.roles.cache.set('other', { id: 'other', name: 'Casual' });
@@ -104,13 +143,14 @@ test('excluded and departed members disappear', () => {
 test('original staff tools and the new rank/access commands have explicit permissions', () => {
   assert.ok(commands.size >= 53);
   assert.ok([...commands.values()].filter(entry => entry.access === 'staff' && entry.name !== 'participants').length >= 47);
-  assert.equal(commands.get('setchannel').access, 'admin');
+  assert.equal(commands.get('setchannel').access, 'manage');
   assert.equal(commands.get('help').access, 'public');
   assert.equal(commands.get('setrank').access, 'rank');
   assert.equal(commands.get('removerank').access, 'rank');
   assert.equal(commands.get('addserver').access, 'homeadmin');
-  assert.equal(commands.get('addevaluator').access, 'admin');
-  assert.equal(commands.get('prefix').access, 'admin');
+  assert.equal(commands.get('addevaluator').access, 'manage');
+  assert.equal(commands.get('prefix').access, 'manage');
+  assert.equal(commands.get('addsetrank').access, 'manage');
 });
 
 test('Administrator does not bypass the two staff-role requirement', () => {
@@ -150,7 +190,7 @@ test('staff participants command validates 1–100 and survives a restart', asyn
   for (const input of ['0', '101', '2.5', '-1', '10x', '']) assert.throws(() => number(input, 1, 100), UserError);
 });
 
-test('undo, redo, and backup restore preserve the administrator-only channel', t => {
+test('undo, redo, and ordinary backup restore preserve the selected channel', t => {
   const store = temporaryStore(t);
   store.runtime(next => { next.delivery.channelId = '123'; });
   store.change('staff', 'limit', next => { next.settings.limit = 25; });
@@ -255,6 +295,19 @@ test('updates reuse existing posts, skip unchanged boards, and delete surplus pa
   assert.equal(f.edited(), 1);
   assert.equal(f.records.size, 1);
   assert.equal(f.store.state.delivery.messageIds.length, 1);
+});
+
+test('a redeployed board reloads its channel and edits the saved posts instead of duplicating them', async t => {
+  const f = deliveryFixture(t);
+  await f.board.publish();
+  const store = new Store(f.store.directory);
+  const restarted = new Board(f.board.client, store, f.guild);
+  restarted.membersReady = true;
+  assert.equal(store.state.delivery.channelId, f.channel.id);
+  await restarted.publish(true);
+  assert.equal(f.sent(), 2);
+  assert.equal(f.edited(), 2);
+  assert.equal(f.records.size, 2);
 });
 
 test('a failed second page retries without duplicating the successful first post', async t => {
