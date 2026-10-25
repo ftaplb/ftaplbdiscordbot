@@ -1,10 +1,10 @@
-import path from 'node:path';
 import { ActivityType, Client, Events, GatewayIntentBits } from 'discord.js';
 import { GUILD_ID } from './config.js';
 import { Servers } from './servers.js';
 import { Coordinator } from './coordinator.js';
 import { commandText, dispatch } from './commands.js';
-import { isRankRoleName, memberChangeAffectsBoard } from './leaderboard.js';
+import { isRankRoleName, memberChangeAffectsBoard, trackedRoleIds } from './leaderboard.js';
+import { storageInfo } from './storage.js';
 import { errorLabel, UserError } from './util.js';
 
 const token = process.env.DISCORD_TOKEN?.trim();
@@ -13,7 +13,10 @@ if (!token || token === 'put_your_bot_token_here') {
   process.exit(1);
 }
 
-const servers = new Servers(process.env.DATA_DIR || path.resolve('data'));
+const storage = storageInfo();
+console.log(`Storage: ${storage.directory}. ${storage.status}`);
+if (storage.warning) console.warn(storage.warning);
+const servers = new Servers(storage.directory);
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
   allowedMentions: { parse: [], repliedUser: false },
@@ -57,8 +60,7 @@ client.on(Events.UserUpdate, (before, after) => {
 
 function relevantRole(role) {
   if (!servers.enabled(role.guild.id)) return false;
-  const mappings = servers.store(role.guild.id).state.rankRoles;
-  return isRankRoleName(role.name) || Object.values(mappings).includes(role.id);
+  return isRankRoleName(role.name) || trackedRoleIds(servers.store(role.guild.id).state).includes(role.id);
 }
 client.on(Events.GuildRoleUpdate, (before, after) => { if (relevantRole(before) || relevantRole(after)) coordinator.schedule(after.guild.id); });
 for (const event of [Events.GuildRoleCreate, Events.GuildRoleDelete]) client.on(event, role => { if (relevantRole(role)) coordinator.schedule(role.guild.id); });

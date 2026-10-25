@@ -2,9 +2,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { defaults, GUILD_ID } from './config.js';
 import { requireThat } from './util.js';
+import { validateBackup } from './backup.js';
 
-const editable = ['settings', 'players', 'order', 'excluded', 'rankRoles'];
+const legacyEditable = ['settings', 'players', 'order', 'excluded', 'rankRoles'];
+const editable = [...legacyEditable, 'customRanks', 'regionRoles', 'deviceRoles'];
 export const snapshot = state => Object.fromEntries(editable.map(key => [key, structuredClone(state[key])]));
+const restoredData = data => Object.fromEntries(editable.filter(key => Object.hasOwn(data, key)).map(key => [key, structuredClone(data[key])]));
 
 export class Store {
   constructor(directory, guildId = GUILD_ID) {
@@ -25,6 +28,7 @@ export class Store {
     fs.writeFileSync(temporary, JSON.stringify(next, null, 2), { mode: 0o600 });
     fs.renameSync(temporary, this.file);
     this.state = next;
+    this.ensureBackup();
   }
 
   change(actor, action, edit) {
@@ -56,15 +60,25 @@ export class Store {
     requireThat(from.length, `Nothing to ${direction}.`);
     const entry = from.pop();
     to.push({ action: entry.action, data: snapshot(next) });
-    Object.assign(next, entry.data);
+    Object.assign(next, restoredData(entry.data));
     this.record(next, actor, `${direction}: ${entry.action}`);
     this.save(next);
     return entry.action;
   }
 
+  backupData() {
+    return { version: 2, guildId: this.state.guildId, createdAt: new Date().toISOString(), data: snapshot(this.state),
+      configuration: { prefix: this.state.prefix, access: structuredClone(this.state.access), delivery: structuredClone(this.state.delivery) } };
+  }
+
+  ensureBackup() {
+    const newest = Number(this.backups()[0] ?? 0);
+    if (Date.now() - newest >= 24 * 60 * 60 * 1000) this.backup();
+  }
+
   backup() {
-    const id = `${Date.now()}`;
-    fs.writeFileSync(path.join(this.directory, 'backups', `${id}.json`), JSON.stringify({ version: 1, data: snapshot(this.state) }, null, 2), { mode: 0o600 });
+    const id = `${Math.max(Date.now(), Number(this.backups()[0] ?? 0) + 1)}`;
+    fs.writeFileSync(path.join(this.directory, 'backups', `${id}.json`), JSON.stringify(this.backupData(), null, 2), { mode: 0o600 });
     // Keep the newest 30 local snapshots; exported downloads are independent.
     for (const old of this.backups().slice(30)) fs.unlinkSync(path.join(this.directory, 'backups', `${old}.json`));
     return id;
@@ -77,7 +91,30 @@ export class Store {
   restore(actor, id) {
     requireThat(/^\d+$/.test(id ?? '') && this.backups().includes(id), 'Use a backup ID from $backups.');
     const saved = JSON.parse(fs.readFileSync(path.join(this.directory, 'backups', `${id}.json`), 'utf8'));
-    requireThat(saved.version === 1 && editable.every(key => Object.hasOwn(saved.data, key)), 'That backup is invalid.');
-    this.change(actor, `restore ${id}`, next => Object.assign(next, Object.fromEntries(editable.map(key => [key, saved.data[key]]))));
+    requireThat([1, 2].includes(saved.version) && saved.data && legacyEditable.every(key => Object.hasOwn(saved.data, key)), 'That backup is invalid.');
+    this.change(actor, `restore ${id}`, next => Object.assign(next, restoredData(saved.data)));
+  }
+
+  readBackup(id) {
+    requireThat(/^\d+$/.test(id ?? '') && this.backups().includes(id), 'Use a backup ID from $backups.');
+    return JSON.parse(fs.readFileSync(path.join(this.directory, 'backups', `${id}.json`), 'utf8'));
+  }
+
+  restoreConfiguration(actor, payload) {
+    let compatible = payload;
+    if (payload?.version === 1) {
+      requireThat(payload.data && legacyEditable.every(key => Object.hasOwn(payload.data, key)), 'That legacy backup is invalid.');
+      requireThat(!payload.guildId || payload.guildId === this.state.guildId, 'That backup belongs to a different server.');
+      // Legacy downloads contain board data only. Preserve all current configuration.
+      compatible = this.backupData();
+      for (const key of legacyEditable) compatible.data[key] = structuredClone(payload.data[key]);
+    }
+    const saved = validateBackup(compatible, this.state.guildId);
+    const previous = this.backup();
+    const next = { ...structuredClone(this.state), ...saved.data, ...saved.configuration, undo: [], redo: [] };
+    next.delivery.fingerprint = null;
+    this.record(next, actor, 'restore full configuration');
+    this.save(next);
+    return previous;
   }
 }

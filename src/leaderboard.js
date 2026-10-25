@@ -27,9 +27,12 @@ function oneTypo(a, b) {
 
 export const isRankRoleName = value => aliases.has(normalized(value));
 
-export function rankByName(value) {
+export const configuredRanks = state => [...RANKS, ...(state?.customRanks ?? [])].map((rank, index) => ({ ...rank, index }));
+
+export function rankByName(value, state) {
   const name = normalized(value);
-  let rank = aliases.get(name);
+  let rank = configuredRanks(state).find(candidate => candidate.roleId === String(value).replace(/^<@&(\d+)>$/, '$1') ||
+    normalized(candidate.name) === name) ?? aliases.get(name);
   if (!rank && name.length >= 4) {
     const closest = new Map([...aliases].filter(([alias]) => oneTypo(name, alias)).map(([, candidate]) => [candidate.name, candidate]));
     if (closest.size === 1) rank = closest.values().next().value;
@@ -38,29 +41,41 @@ export function rankByName(value) {
   return rank;
 }
 
-export function ranksToRemove(value) {
+export function ranksToRemove(value, state) {
   const name = String(value ?? '').trim().toLowerCase();
-  if (!name || name === 'all') return RANKS;
+  if (!name || name === 'all') return configuredRanks(state);
   const families = { skillful: 'Skillful', sk: 'Skillful', expert: 'Expert', e: 'Expert', advanced: 'Advanced', adv: 'Advanced' };
   if (families[name]) return RANKS.filter(rank => rank.name.startsWith(`${families[name]} `));
-  return [rankByName(value)];
+  return [rankByName(value, state)];
 }
 
 export function roleMap(guild, state) {
-  return new Map(RANKS.map(rank => {
+  return new Map(configuredRanks(state).map(rank => {
+    if (rank.roleId) return [rank.name, guild.roles.cache.get(rank.roleId) ?? null];
     if (Object.hasOwn(state.rankRoles, rank.name)) return [rank.name, guild.roles.cache.get(state.rankRoles[rank.name]) ?? null];
     const matches = [...guild.roles.cache.values()].filter(role => aliases.get(normalized(role.name))?.name === rank.name);
     return [rank.name, matches.length === 1 ? matches[0] : null];
   }));
 }
 
-export function memberRank(member, roles) {
-  return RANKS.find(rank => roles.get(rank.name) && member.roles.cache.has(roles.get(rank.name).id)) ?? null;
+export function memberRank(member, roles, state) {
+  return configuredRanks(state).find(rank => roles.get(rank.name) && member.roles.cache.has(roles.get(rank.name).id)) ?? null;
+}
+
+export function memberLabels(member, mappings) {
+  return Object.entries(mappings ?? {}).filter(([, id]) => member.roles.cache.has(id)).map(([label]) => label).join(' / ');
+}
+
+export function trackedRoleIds(state) {
+  return [...Object.values(state.rankRoles), ...(state.customRanks ?? []).map(rank => rank.roleId),
+    ...Object.values(state.regionRoles ?? {}), ...Object.values(state.deviceRoles ?? {})];
 }
 
 export function memberChangeAffectsBoard(before, after, state) {
   const ids = [...roleMap(after.guild, state).values()].filter(Boolean).map(role => role.id);
   return ids.some(id => before.roles.cache.has(id) !== after.roles.cache.has(id)) ||
+    ([before, after].some(member => ids.some(id => member.roles.cache.has(id))) &&
+      [...Object.values(state.regionRoles ?? {}), ...Object.values(state.deviceRoles ?? {})].some(id => before.roles.cache.has(id) !== after.roles.cache.has(id))) ||
     (before.displayName !== after.displayName && ids.some(id => after.roles.cache.has(id)));
 }
 
@@ -71,15 +86,14 @@ export function standings(guild, state) {
   const rows = [];
   for (const member of guild.members.cache.values()) {
     if (member.user.bot || excluded.has(member.id)) continue;
-    const rank = memberRank(member, roles);
+    const rank = memberRank(member, roles, state);
     if (!rank) continue;
     const profile = state.players[member.id] ?? {};
     rows.push({
       id: member.id, name: profile.name || member.displayName,
       username: member.user.username, roblox: profile.roblox || '',
       score: profile.score ?? 0, wins: profile.wins ?? 0, losses: profile.losses ?? 0,
-      rating: profile.score ?? null, rd: profile.rd ?? null,
-      country: profile.country || '', clan: profile.clan || '',
+      region: memberLabels(member, state.regionRoles), device: memberLabels(member, state.deviceRoles),
       rank: rank.name, rankIndex: rank.index, color: rank.color,
     });
   }
